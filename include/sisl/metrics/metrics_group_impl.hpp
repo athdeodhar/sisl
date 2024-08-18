@@ -49,6 +49,7 @@ enum class _publish_as : uint8_t {
     publish_as_counter,
     publish_as_gauge,
     publish_as_histogram,
+    publish_as_summary,
 };
 
 /****************************** Counter ************************************/
@@ -298,6 +299,82 @@ private:
     std::variant< std::shared_ptr< ReportHistogram >, std::shared_ptr< ReportGauge > > m_report_histogram_gauge;
 };
 
+/****************************** Summary ************************************/
+class SummaryValue {
+public:
+    SummaryValue() = default;
+    SummaryValue(const SummaryValue&) = default;
+    SummaryValue(SummaryValue&&) noexcept = default;
+    SummaryValue& operator=(const SummaryValue&) = delete;
+    SummaryValue& operator=(SummaryValue&&) noexcept = delete;
+
+    void observe(const int64_t value) {
+        m_sum += value;
+        m_count++;
+        quantile_values.insert(value);
+    }
+
+    //ADTODO - figure out if merge is needed
+
+    [[nodiscard]] int64_t get_sum() const { return m_sum; }
+    [[nodiscard]] uint64_t get_count() const { return m_count; }
+    [[nodiscard]] const std::set< int64_t >& get_quantile_values() const { return quantile_values; }
+    // ADTODO - check if get_quantile_values is needed
+
+private:
+    int64_t m_sum{0};
+    uint64_t m_count{0};
+    TimeWindowQuantiles quantile_values;
+};
+
+static_asser(std:is_trivially_copyable< SummaryValue >::value, "Expecting SummaryValue to be trivally copyable");
+
+class SummaryStaticInfo {
+    friend class SummaryDynamicInfo;
+
+public:
+    SummaryStaticInfo(const std::string& name, const std::string& desc, const std::string& report_name = "",
+                      const metric_label& label_pair = {"", ""});
+
+    SummaryStaticInfo(const SummaryStaticInfo&) = default;
+    SummaryStaticInfo(SummaryStaticInfo&&) noexcept = delete;
+    SummaryStaticInfo& operator=(const SummaryStaticInfo&) = delete;
+    SummaryStaticInfo& operator=(SummaryStaticInfo&&) noexcept = delete;
+
+    [[nodiscard]] const std::string& name() const { return m_name; }
+    [[nodiscard]] const std::string& desc() const { return m_desc; }
+    [[nodiscard]] std::string label_pair() const {
+        return (!m_label_pair.first.empty() && !m_label_pair.second.empty())
+            ? m_label_pair.first + "-" + m_label_pair.second
+            : "";
+    }
+
+    // ADTODO - check if get_quantiles goes here
+
+private:
+    const std::string m_name;
+    const std::string m_desc;
+    std::pair< std::string, std::string > m_label_pair;
+};
+
+class SummaryDynamicInfo {
+public:
+    SummaryDynamicInfo(const SummaryStaticInfo& static_info, const std::string& instance_name);
+
+    SummaryDynamicInfo(const SummaryDynamicInfo&) = default;
+    SummaryDynamicInfo(SummaryDynamicInfo&&) noexcept = delete;
+    SummaryDynamicInfo& operator=(const SummaryDynamicInfo&) = delete;
+    SummaryDynamicInfo& operator=(SummaryDynamicInfo&&) noexcept = delete;
+
+    // ADTODO - check if something like percentile/count/average go here
+
+    void publish(const SummaryValue& value);
+    void unregister(const SummaryStaticInfo& static_info);
+
+private:
+    std::shared_ptr< ReportSummary > m_report_summary;
+};
+
 class MetricsGroupImpl;
 using MetricsGroupImplPtr = std::shared_ptr< MetricsGroupImpl >;
 
@@ -325,10 +402,14 @@ public:
     uint64_t register_histogram(const std::string& name, const std::string& desc, const std::string& report_name = "",
                                 const metric_label& label_pair = {"", ""},
                                 const hist_bucket_boundaries_t& bkt_boundaries = HistogramBucketsType(DefaultBuckets));
+    
+    uint64_t register_summary(const std::string& name, const std::string& desc, const std::string& report_name = "",
+                              const metric_label& label_pair = {"", ""});
 
     [[nodiscard]] const CounterStaticInfo& get_counter_info(uint64_t index) const;
     [[nodiscard]] const GaugeStaticInfo& get_gauge_info(uint64_t index) const;
     [[nodiscard]] const HistogramStaticInfo& get_histogram_info(uint64_t index) const;
+    [[nodiscard]] const SummaryStaticInfo& get_summary_info(uint64_t index) const;
 
 public:
     std::string m_grp_name;
@@ -337,12 +418,14 @@ public:
     std::vector< CounterStaticInfo > m_counters;
     std::vector< GaugeStaticInfo > m_gauges;
     std::vector< HistogramStaticInfo > m_histograms;
+    std::vector< SummaryStaticInfo > m_summaries;
     bool m_reg_pending{true};
 };
 
 using counter_gather_cb_t = std::function< void(uint64_t, const CounterValue&) >;
 using gauge_gather_cb_t = std::function< void(uint64_t, const GaugeValue&) >;
 using histogram_gather_cb_t = std::function< void(uint64_t, const HistogramValue&) >;
+using summary_gather_cb_t = std::function< void(uint64_t, const SummaryValue&) >;
 
 class MetricsGroupImpl {
 private:
@@ -383,6 +466,8 @@ public:
                                 _publish_as ptype = _publish_as::publish_as_histogram);
     uint64_t register_histogram(const std::string& name, const std::string& desc, _publish_as ptype);
 
+    // ADTODO - ask sisl developers what this part does/which registers are needed
+
     virtual void counter_increment(const uint64_t index, const int64_t val = 1) = 0;
     virtual void counter_decrement(const uint64_t index, const int64_t val = 1) = 0;
 
@@ -390,6 +475,8 @@ public:
 
     virtual void histogram_observe(const uint64_t index, const int64_t val, const uint64_t count) = 0;
     virtual void histogram_observe(const uint64_t index, const int64_t val) = 0;
+
+    virtual void summary_observe(const uint64_t index, const int64_t val) = 0;
 
     nlohmann::json get_result_in_json(const bool need_latest);
     [[nodiscard]] const std::string& get_group_name() const;
@@ -413,6 +500,12 @@ public:
     }
     virtual HistogramDynamicInfo& hist_dynamic_info(const uint64_t idx) { return m_histograms_dinfo[idx]; }
 
+    [[nodiscard]] virtual const SummaryStaticInfo& summary_static_info(const uint64_t idx) const {
+        return m_static_info->m_summaries[idx];
+    }
+    virtual SummaryDynamicInfo& summary_dynamic_info(const uint64_t idx) { return m_summaries_dinfo[idx]; }
+
+
     [[nodiscard]] virtual uint64_t num_counters() const {
         assert(m_static_info->m_counters.size() == m_counters_dinfo.size());
         return m_counters_dinfo.size();
@@ -426,6 +519,11 @@ public:
     [[nodiscard]] virtual uint64_t num_histograms() const {
         assert(m_static_info->m_histograms.size() == m_histograms_dinfo.size());
         return m_histograms_dinfo.size();
+    }
+
+    [[nodiscard]] virtual uint64_t num_summaries() const {
+        assert(m_static_info->m_summaries.size() == m_summaries_dinfo.size());
+        return m_summaries_dinfo.size();
     }
 
     void attach_gather_cb(const on_gather_cb_t& cb) {
@@ -450,7 +548,8 @@ public:
 
 protected:
     virtual void gather_result(const bool need_latest, const counter_gather_cb_t& counter_cb,
-                               const gauge_gather_cb_t& gauge_cb, const histogram_gather_cb_t& histogram_cb) = 0;
+                               const gauge_gather_cb_t& gauge_cb, const histogram_gather_cb_t& histogram_cb,
+                               const summary_gather_cb_t& summary_cb) = 0;
 
 protected:
     std::string m_inst_name;
@@ -461,6 +560,7 @@ protected:
     std::vector< CounterDynamicInfo > m_counters_dinfo;
     std::vector< GaugeDynamicInfo > m_gauges_dinfo;
     std::vector< HistogramDynamicInfo > m_histograms_dinfo;
+    std::vector< SummaryDynamicInfo > m_summaries_dinfo;
 
     std::vector< GaugeValue > m_gauge_values;
     std::vector< MetricsGroupImplPtr > m_child_groups;
