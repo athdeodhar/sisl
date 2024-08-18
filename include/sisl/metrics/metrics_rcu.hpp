@@ -47,7 +47,7 @@ public:
 private:
     void on_register();
     void gather_result(bool need_latest, const counter_gather_cb_t& counter_cb, const gauge_gather_cb_t& gauge_cb,
-                       const histogram_gather_cb_t& histogram_cb) override;
+                       const histogram_gather_cb_t& histogram_cb, const summary_gather_cb_t& summary_gather_cb) override;
 
 private:
     std::unique_ptr< WisrBufferMetrics > m_metrics;
