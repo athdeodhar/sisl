@@ -20,7 +20,7 @@
 namespace sisl {
 
 void WisrBufferMetricsGroup::on_register() {
-    m_metrics = std::make_unique< WisrBufferMetrics >(m_static_info->m_histograms, num_counters(), num_histograms());
+    m_metrics = std::make_unique< WisrBufferMetrics >(m_static_info->m_histograms, num_counters(), num_histograms(), num_summaries());
 }
 
 void WisrBufferMetricsGroup::counter_increment(uint64_t index, int64_t val) {
