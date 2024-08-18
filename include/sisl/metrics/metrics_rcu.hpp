@@ -40,6 +40,7 @@ public:
     void counter_decrement(uint64_t index, int64_t val = 1) override;
     void histogram_observe(uint64_t index, int64_t val) override;
     void histogram_observe(uint64_t index, int64_t val, uint64_t count) override;
+    void summary_observe(uint64_t index, double val) override;
 
     group_impl_type_t impl_type() const { return group_impl_type_t::rcu; }
 

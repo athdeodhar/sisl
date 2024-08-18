@@ -47,9 +47,15 @@ void WisrBufferMetricsGroup::histogram_observe(uint64_t index, int64_t val, uint
     m->get_histogram(index).observe(val, hist_static_info(index).get_boundaries(), count);
 }
 
+void WisrBufferMetricsGroup::summary_observe(uint64_t index, double val) {
+    auto m{m_metrics->insert_access()};
+    m->get_summary(index).observe(val);
+}
+
 void WisrBufferMetricsGroup::gather_result(bool need_latest, const counter_gather_cb_t& counter_cb,
                                            const gauge_gather_cb_t& gauge_cb,
-                                           const histogram_gather_cb_t& histogram_cb) {
+                                           const histogram_gather_cb_t& histogram_cb,
+                                           const summary_gather_cb_t& summary_cb) {
     PerThreadMetrics* tmetrics;
     if (need_latest) {
         tmetrics = m_metrics->now();
@@ -67,6 +73,10 @@ void WisrBufferMetricsGroup::gather_result(bool need_latest, const counter_gathe
 
     for (size_t i{0}; i < num_histograms(); ++i) {
         histogram_cb(i, tmetrics->get_histogram(i));
+    }
+
+    for (size_t i{0}; i < num_summaries(); ++i) {
+        summary_cb(i, m_summary_values[i]);
     }
 }
 } // namespace sisl
