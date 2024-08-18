@@ -151,6 +151,9 @@ class NamedGauge;
 template < typename >
 class NamedHistogram;
 
+template < typename >
+class NamedSummary;
+
 template < char... elements >
 class NamedCounter< tstring< elements... > > {
 public:
@@ -223,6 +226,30 @@ private:
     size_t m_Index;
 };
 
+template < char... elements >
+struct NamedSummary< tstring< elements... > > {
+public:
+    NamedSummary(const NamedSummary&) = delete;
+    NamedSummary(NamedSummary&&) noexcept = delete;
+    NamedSummary& operator=(const NamedSummary&) = delete;
+    NamedSummary& operator=(NamedSummary&&) noexcept = delete;
+
+    static NamedSummary& getInstance() {
+        static NamedSummary instance;
+        return instance;
+    }
+
+    void set_index(const uint64_t index) { m_Index = index; }
+    [[nodiscard]] uint64_t get_index() const { return m_Index; }
+    [[nodiscard]] constexpr const char* get_name() const { return m_Name; }
+
+private:
+    NamedSummary() : m_Index{std::numeric_limits< uint64_t >::max()} {}
+
+    static constexpr char m_Name[sizeof...(elements) + 1] = {elements..., '\0'};
+    size_t m_Index;
+};
+
 // decltype(BOOST_PP_CAT(BOOST_PP_STRINGIZE(name), _tstr)
 
 #define REGISTER_COUNTER(name, ...)                                                                                    \
@@ -246,9 +273,17 @@ private:
         nh.set_index(this->m_impl_ptr->register_histogram(nh.get_name(), __VA_ARGS__));                                \
     }
 
+#define REGISTER_SUMMARY(name, ...)                                                                                    \
+    {                                                                                                                  \
+        using namespace sisl;                                                                                          \
+        auto& ns{sisl::NamedSummary< decltype(BOOST_PP_CAT(BOOST_PP_STRINGIZE(name), _tstr)) >::getInstance()};      \
+        ns.set_index(this->m_impl_ptr->register_summary(ns.get_name(), __VA_ARGS__));                                  \
+    }
+
 #define COUNTER_INDEX(name) METRIC_NAME_TO_INDEX(NamedCounter, name)
 #define GAUGE_INDEX(name) METRIC_NAME_TO_INDEX(NamedGauge, name)
 #define HISTOGRAM_INDEX(name) METRIC_NAME_TO_INDEX(NamedHistogram, name)
+#define SUMMARY_INDEX(name) METRIC_NAME_TO_INDEX(NamedSummary, name)
 
 #define METRIC_NAME_TO_INDEX(type, name)                                                                               \
     (sisl::type< decltype(BOOST_PP_CAT(BOOST_PP_STRINGIZE(name), _tstr)) >::getInstance().get_index())
@@ -300,6 +335,9 @@ private:
     __VALIDATE_AND_EXECUTE(group, NamedHistogram, histogram_observe, name, __VA_ARGS__)
 #define HISTOGRAM_OBSERVE_IF_ELSE(group, cond, namea, nameb, ...)                                                      \
     __VALIDATE_AND_EXECUTE_IF_ELSE(group, NamedHistogram, histogram_observe, cond, namea, nameb, __VA_ARGS__)
+
+#define SUMMARY_OBSERVE(group, name, ...)                                                                              \
+    __VALIDATE_AND_EXECUTE(group, NamedSummary, summary_observe, name, __VA_ARGS__)
 
 #if 0
 #define COUNTER_INCREMENT(group, name, ...)                                                                            \
