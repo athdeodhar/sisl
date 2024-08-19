@@ -113,6 +113,12 @@ uint64_t MetricsGroupStaticInfo::register_histogram(const std::string& name, con
     return m_histograms.size() - 1;
 }
 
+uint64_t MetricsGroupStaticInfo::register_summary(const std::string& name, const std::string& desc,
+                                                  const std::string& report_name, const metric_label& label_pair) {
+    m_summaries.emplace_back(name, desc, report_name, label_pair);
+    return m_summaries.size() - 1;
+}
+
 std::shared_ptr< MetricsGroupStaticInfo > MetricsGroupStaticInfo::create_or_get_info(const std::string& grp_name) {
     static folly::Synchronized< std::unordered_map< std::string, std::shared_ptr< MetricsGroupStaticInfo > > > _grp_map;
 
@@ -144,6 +150,10 @@ MetricsGroupImpl::~MetricsGroupImpl() {
 
     for (size_t idx{0}; idx < m_histograms_dinfo.size(); ++idx) {
         m_histograms_dinfo[idx].unregister(m_static_info->m_histograms[idx]);
+    }
+
+    for (size_t idx{0}; idx < m_summaries_dinfo.size(); ++idx) {
+        m_summaries_dinfo[idx].unregister(m_static_info->m_summaries[idx]);
     }
 }
 
@@ -218,6 +228,8 @@ uint64_t MetricsGroupImpl::register_histogram(const std::string& name, const std
     return register_histogram(name, desc, "", {"", ""}, HistogramBucketsType(DefaultBuckets), ptype);
 }
 
+// ADTODO - figure out which register_summary implementations are necessary
+
 void MetricsGroupImpl::gauge_update(uint64_t index, int64_t val) { m_gauge_values[index].update(val); }
 
 nlohmann::json MetricsGroupImpl::get_result_in_json(bool need_latest) {
@@ -226,6 +238,7 @@ nlohmann::json MetricsGroupImpl::get_result_in_json(bool need_latest) {
     nlohmann::json counter_entries;
     nlohmann::json gauge_entries;
     nlohmann::json hist_entries;
+    nlohmann::json summary_entries;
 
     if (m_on_gather_cb) { m_on_gather_cb(); }
     gather_result(
@@ -247,11 +260,24 @@ nlohmann::json MetricsGroupImpl::get_result_in_json(bool need_latest) {
             } else {
                 hist_entries[hist_static_info(idx).desc()] = std::to_string(h.average(result));
             }
+        },
+        [&summary_entries, this](uint64_t idx, const SummaryValue& result) {
+            SummaryDynamicInfo& s = summary_dynamic_info(idx);
+            if (s.is_summary_reporter()) {
+                summary_entries[summary_static_info(idx).desc()] =
+                    fmt::format("{:.1f} / {:.1f} / {:.1f} / {:.1f}", s.average(result),
+                                s.percentile(result, summary_static_info(idx).get_boundaries(), 50),
+                                s.percentile(result, summary_static_info(idx).get_boundaries(), 95),
+                                s.percentile(result, summary_static_info(idx).get_boundaries(), 99));
+            } else {
+                summary_entries[summary_static_info(idx).desc()] = std::to_string(s.average(result));
+            }
         });
 
     json["Counters"] = counter_entries;
     json["Gauges"] = gauge_entries;
     json["Histograms percentiles (usecs) avg/50/95/99"] = hist_entries;
+    json["Summaries percentiles (usecs) avg/50/95/99"] = summary_entries;
 
     for (auto& cg : m_child_groups) {
         json[cg->m_inst_name] = cg->get_result_in_json(need_latest);
@@ -267,6 +293,7 @@ void MetricsGroupImpl::publish_result() {
         [this](uint64_t idx, const CounterValue& result) { counter_dynamic_info(idx).publish(result); }, // Counter
         [this](uint64_t idx, const GaugeValue& result) { gauge_dynamic_info(idx).publish(result); },     // Gauge
         [this](uint64_t idx, const HistogramValue& result) { hist_dynamic_info(idx).publish(result); }); // Histogram
+        [this](uint64_t idx, const SummaryValue& result) { summary_dynamic_info(idx).publish(result); }); // Summary
 
     // Call child group publish result
     for (auto& cg : m_child_groups) {
@@ -282,6 +309,7 @@ void MetricsGroupImpl::gather() {
         []([[maybe_unused]] uint64_t idx, [[maybe_unused]] const CounterValue& result) {},
         []([[maybe_unused]] uint64_t idx, [[maybe_unused]] const GaugeValue& result) {},
         []([[maybe_unused]] uint64_t idx, [[maybe_unused]] const HistogramValue& result) {});
+        []([[maybe_unused]] uint64_t idx, [[maybe_unused]] const SummaryValue& result) {});
 
     for (auto& cg : m_child_groups) {
         cg->gather();
@@ -417,6 +445,34 @@ void HistogramDynamicInfo::unregister(const HistogramStaticInfo& static_info) {
         MetricsFarm::get_reporter().remove_histogram(static_info.m_name, as_histogram());
     } else {
         MetricsFarm::get_reporter().remove_gauge(static_info.m_name, as_gauge());
+    }
+}
+
+/***************************** SummaryStaticInfo **************************/
+SummaryStaticInfo::SummaryStaticInfo(const std::string& name, const std::string& desc, const std::string& report_name,
+                                     const metric_label& label_pair) :
+        m_name(report_name.empty() ? name : report_name), m_desc(desc) {
+    if (!label_pair.first.empty() && !label_pair.second.empty()) { m_label_pair = label_pair; }
+}
+
+SummaryDynamicInfo::SummaryDynamicInfo(const SummaryStaticInfo& static_info, const std::string& instance_name,
+                                       _publish_as ptype) {
+    if (ptype == _publish_as::publish_as_summary) {
+        m_report_summary_gauge = MetricsFarm::get_reporter().add_summary(static_info.m_name, static_info.m_desc,
+                                                                        instance_name, static_info.m_label_pair);
+    } else {
+        m_report_summary_gauge = MetricsFarm::get_reporter().add_gauge(static_info.m_name, static_info.m_desc,
+                                                                       instance_name, static_info.m_label_pair);
+    }
+}
+
+void SummaryDynamicInfo::publish(const SummaryValue& svalue) {
+    if (is_summary_reporter()) {
+        const auto arr = svalue.get_freqs();
+        auto v = std::vector< double >(arr.cbegin(), arr.cend());
+        as_summary()->set_value(v, svalue.get_sum());
+    } else {
+        as_gauge()->set_value(average(svalue));
     }
 }
 } // namespace sisl
